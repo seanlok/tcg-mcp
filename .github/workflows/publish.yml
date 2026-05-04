@@ -1,27 +1,34 @@
-name: Publish to PyPI
+name: Publish
 
 # Triggered when a GitHub Release is published.
 #
-# Uses PyPI Trusted Publishing (OIDC) — NO API token in this repo and NO
-# secret stored in GitHub Secrets. To enable:
-#   1. Reserve "tcg-mcp" on https://pypi.org/manage/account/publishing/
-#      with: GitHub Repository = seanlok/tcg-mcp, workflow = publish.yml,
-#      environment = pypi.
-#   2. Tag a release on GitHub matching the pyproject.toml version
-#      (e.g. v0.2.0). The first publish will mint the package.
+# Two jobs run sequentially:
+#   1. build-and-publish-pypi — builds wheel + sdist and uploads to PyPI
+#      via OIDC Trusted Publishing (no API token in the repo).
+#   2. publish-mcp-registry  — waits for PyPI to propagate, then submits
+#      metadata to the MCP Registry via OIDC (`mcp-publisher login
+#      github-oidc`). No PAT, no DNS key — uses the workflow's own GitHub
+#      identity.
+#
+# Configuration that lives outside this file:
+#   - PyPI Trusted Publisher must be configured at
+#     https://pypi.org/manage/account/publishing/ pointing at
+#     (seanlok/tcg-mcp, workflow=publish.yml, environment=pypi).
+#   - GitHub Environment "pypi" must exist on the repo (Settings →
+#     Environments). No secrets required.
 
 on:
   release:
     types: [published]
 
-permissions:
-  id-token: write   # required for OIDC trusted publishing
-  contents: read
-
 jobs:
-  build-and-publish:
+  build-and-publish-pypi:
+    name: Build & publish to PyPI
     runs-on: ubuntu-latest
     environment: pypi
+    permissions:
+      id-token: write    # OIDC for PyPI Trusted Publishing
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -35,7 +42,7 @@ jobs:
           python -m pip install --upgrade pip build
           python -m build
 
-      - name: Verify version matches tag
+      - name: Verify pyproject version matches tag
         run: |
           PKG_VERSION=$(python -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
           TAG_VERSION="${GITHUB_REF_NAME#v}"
@@ -46,3 +53,59 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-mcp-registry:
+    name: Publish to MCP Registry
+    needs: build-and-publish-pypi
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write    # OIDC for `mcp-publisher login github-oidc`
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify server.json versions match tag
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          ROOT_VERSION=$(python3 -c "import json; print(json.load(open('server.json'))['version'])")
+          PKG_VERSION=$(python3 -c "import json; print(json.load(open('server.json'))['packages'][0]['version'])")
+          if [ "$ROOT_VERSION" != "$TAG_VERSION" ] || [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::server.json version mismatch — root=$ROOT_VERSION packages[0]=$PKG_VERSION tag=$TAG_VERSION"
+            exit 1
+          fi
+
+      - name: Wait for PyPI to propagate
+        # PyPI metadata can lag the upload by 30-60s. The registry rejects
+        # the publish if the version isn't visible yet, so we poll.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 30); do
+            if curl -fsSL "https://pypi.org/pypi/tcg-mcp/$VERSION/json" -o /dev/null; then
+              echo "PyPI tcg-mcp $VERSION is live."
+              exit 0
+            fi
+            echo "PyPI not ready yet ($i/30) — sleeping 5s..."
+            sleep 5
+          done
+          echo "::error::PyPI tcg-mcp $VERSION did not become visible within 150 seconds."
+          exit 1
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+          URL="https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_${OS}_${ARCH}.tar.gz"
+          echo "Downloading $URL"
+          curl -fsSL "$URL" | tar -xz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --help | head -3
+
+      - name: Authenticate to MCP Registry (OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
+
+      - name: Publish to MCP Registry
+        run: ./mcp-publisher publish
