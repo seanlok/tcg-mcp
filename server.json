@@ -1,0 +1,47 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.seanlok/tcg-mcp",
+  "description": "Pokemon TCG MCP server: PSA grading lookups, local SQLite-backed collection + watchlist + pop trends, plus pricing via Pokemon TCG API and PriceCharting.",
+  "title": "TCG MCP",
+  "repository": {
+    "url": "https://github.com/seanlok/tcg-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "tcg-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "PSA_API_TOKEN",
+          "description": "PSA Public API bearer token. Get one at https://www.psacard.com/publicapi. If unset, PSA tools are disabled but other tools (Pokemon TCG API, collection, watchlist) still work.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "POKEMONTCG_API_KEY",
+          "description": "Pokemon TCG API key (optional). Without it the provider still works at a lower rate limit. Free key: https://dev.pokemontcg.io/",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "PRICECHARTING_TOKEN",
+          "description": "PriceCharting API token (paid subscription required). Enables graded-card pricing.",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "TCG_DB_PATH",
+          "description": "Where to put the local SQLite database. Default: ~/.tcg-mcp/tcg.db",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
