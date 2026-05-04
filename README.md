@@ -1,5 +1,7 @@
 # tcg-mcp
 
+<!-- mcp-name: io.github.seanlok/tcg-mcp -->
+
 > A Pokemon TCG MCP server. Looks up graded cards (PSA today, CGC/BGS
 > stubbed), manages your owned collection in a local SQLite DB, queries
 > pricing providers (Pokemon TCG API + PriceCharting), tracks a watchlist
@@ -7,6 +9,9 @@
 > over time.
 
 [![PyPI](https://img.shields.io/pypi/v/tcg-mcp.svg)](https://pypi.org/project/tcg-mcp/)
+[![Python](https://img.shields.io/pypi/pyversions/tcg-mcp.svg)](https://pypi.org/project/tcg-mcp/)
+[![Downloads](https://img.shields.io/pypi/dm/tcg-mcp.svg)](https://pypistats.org/packages/tcg-mcp)
+[![CI](https://github.com/seanlok/tcg-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/seanlok/tcg-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 `tcg-mcp` is a [Model Context Protocol](https://modelcontextprotocol.io)
