@@ -1,6 +1,6 @@
 # Architecture
 
-A short tour of how `grading_mcp` is wired together.
+A short tour of how `tcg_mcp` is wired together.
 
 ## Layers
 
@@ -55,11 +55,57 @@ If we ever move to streamable HTTP transport (where calls become much higher
 frequency), we should promote the client to a FastMCP lifespan-managed
 singleton so we keep the connection pool across calls.
 
+## Why we don't use `pokemontcgsdk`
+
+There's an official Python SDK for the Pokemon TCG API at
+[`PokemonTCG/pokemon-tcg-sdk-python`](https://github.com/PokemonTCG/pokemon-tcg-sdk-python),
+distributed on PyPI as `pokemontcgsdk`. We deliberately call the API
+directly via `httpx` instead of pulling in the SDK. Three reasons:
+
+1. **The SDK is synchronous; the rest of our pricing layer is async.**
+   Mixing sync calls into async tool handlers means thread-pool offloads
+   for every request and worse latency. The whole `pricing/` package is
+   built on `httpx.AsyncClient`, so direct calls fit the existing pattern.
+2. **We're already translating to canonical models.** Every response gets
+   normalized into our `PriceQuote` / `CardListing` shapes anyway, so the
+   SDK's own data classes don't carry through to the tool layer. We'd
+   write the same field-extraction code either way; the SDK just adds an
+   extra layer to debug through when something changes upstream.
+3. **Throttle integration.** Each pricing provider plugs into our shared
+   `TokenBucket` rate limiter (`pricing/throttle.py`). Wrapping the SDK
+   would either bypass that bucket — burning quota — or require another
+   layer of plumbing equivalent to what we already have.
+
+If the SDK ever ships an async API or starts exposing endpoints we want
+that aren't in the public API directly (catalog browsing, `Type.all()`,
+etc.), this decision is worth revisiting. Until then, direct HTTP is
+simpler.
+
+The same reasoning applies to PriceCharting — we hit `/api/product`
+directly rather than depending on a third-party wrapper.
+
+## Pricing layer mirrors the grading abstraction
+
+Pricing has its own provider Protocol at `tcg_mcp.pricing.base.PricingProvider`,
+its own registry at `tcg_mcp.pricing.__init__`, and the same "register-only-if-
+credentials-are-present" pattern. This means:
+
+- Pokemon TCG API works without `POKEMONTCG_API_KEY` (just at lower rate).
+- PriceCharting only registers if `PRICECHARTING_TOKEN` is set; otherwise
+  the tool returns a clean "not enabled" error pointing at the env var.
+- SNKRDUNK is registered as a stub (no public API yet) — same shape as
+  CGC/BGS on the grading side.
+
+The bulk-snapshot tool (`tcg_pricing_snapshot_collection`) iterates
+`owned_cards` rows, groups by pricing provider, and serially fetches
+through each provider — natural rate-limit behavior because the
+`TokenBucket` lives on the provider instance, not on the tool.
+
 ## Why provider stubs in v0.1
 
 CGC and BGS are registered as stubs (always present, always raise
 `NotSupportedError`) instead of being absent from the registry. This:
-- Lets `grading_list_providers` surface them as known but unsupported,
+- Lets `tcg_list_providers` surface them as known but unsupported,
   giving the LLM a coherent answer when asked "can this server look up CGC
   certs?"
 - Keeps the `ProviderName` literal stable so adding their real
