@@ -46,6 +46,18 @@ def format_http_error(e: Exception, *, provider: str) -> str:
         if status == 404:
             return f"Error: {provider.upper()} returned 404 — resource not found."
         if status == 429:
+            # PSA's API returns 429 BOTH for genuine rate limiting AND for
+            # invalid/expired tokens, so we can't tell them apart from the
+            # status code alone. Mention both possibilities so the user knows
+            # where to look first.
+            if provider == "psa":
+                return (
+                    "Error: PSA API returned 429. This means EITHER your "
+                    "PSA_API_TOKEN is invalid/expired, OR your daily quota "
+                    "is exhausted. Check the token at "
+                    "https://www.psacard.com/publicapi first; if it looks "
+                    "right, wait an hour for quota reset."
+                )
             return (
                 f"Error: {provider.upper()} API rate limit exceeded. "
                 "Wait and retry, or upgrade your plan."

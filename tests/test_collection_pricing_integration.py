@@ -122,6 +122,12 @@ async def test_value_with_market_joins_latest_snapshot(httpx_mock: HTTPXMock) ->
     assert item["card_id"] == card_id
     assert item["snapshot_provider"] == "pokemontcg"
     assert item["snapshot_listing_id"] == "base1-4"
+    # v0.3 — per-item floats are rounded to 2dp (no `25.340000000000003`).
+    assert item["market_price"] == 7800.0
+    assert item["unrealized"] == 7680.0
+    # Both must be exact float equality, not just close to.
+    assert isinstance(item["unrealized"], float)
+    assert repr(item["unrealized"]) == "7680.0"
 
 
 async def test_value_with_market_counts_unpriced() -> None:

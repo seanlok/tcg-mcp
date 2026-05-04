@@ -239,6 +239,78 @@ class Database:
                 )
             return cur.fetchone()
 
+    def list_pricing_snapshots(
+        self,
+        *,
+        provider: str,
+        listing_id: str,
+        grade: str | None = None,
+        days: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Return the time series of pricing snapshots, oldest -> newest.
+
+        Args:
+            provider: pricing provider name (e.g. "pokemontcg")
+            listing_id: provider-specific listing ID
+            grade: optional grade filter; None means raw/ungraded only.
+                Pass an explicit string ("PSA 10") for graded series.
+            days: only return snapshots from the last N days
+            limit: cap on rows returned
+        """
+        clauses = ["provider = ?", "listing_id = ?"]
+        params: list[Any] = [provider, listing_id]
+        if grade is None:
+            clauses.append("grade IS NULL")
+        else:
+            clauses.append("grade = ?")
+            params.append(grade)
+        if days is not None and days > 0:
+            clauses.append("captured_at >= datetime('now', ?)")
+            params.append(f"-{int(days)} days")
+        where = " AND ".join(clauses)
+        sql = (
+            f"SELECT * FROM pricing_snapshots WHERE {where} "
+            "ORDER BY captured_at ASC LIMIT ?"
+        )
+        params.append(limit)
+        with self.connect() as conn:
+            cur = conn.execute(sql, params)
+            return list(cur.fetchall())
+
+    def list_owned_with_pricing(
+        self,
+        *,
+        provider: str | None = None,
+        status: str | None = "owned",
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Owned cards that have a pricing listing attached, for bulk operations.
+
+        Filters out rows where pricing_provider or pricing_listing_id is NULL.
+
+        Args:
+            provider: optional pricing-provider filter ("pokemontcg", etc.)
+            status: collection status; defaults to 'owned'
+            limit: optional row cap (None = no cap)
+        """
+        clauses = ["pricing_provider IS NOT NULL", "pricing_listing_id IS NOT NULL"]
+        params: list[Any] = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if provider is not None:
+            clauses.append("pricing_provider = ?")
+            params.append(provider)
+        where = " AND ".join(clauses)
+        sql = f"SELECT * FROM owned_cards WHERE {where} ORDER BY created_at ASC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(limit)
+        with self.connect() as conn:
+            cur = conn.execute(sql, params)
+            return list(cur.fetchall())
+
     # ---- watchlist CRUD ----------------------------------------------------
 
     def add_watchlist(self, fields: dict[str, Any]) -> str:
@@ -427,6 +499,14 @@ class Database:
             else:
                 total_market += float(market)
 
+            # Round per-item floats to 2dp to avoid 25.340000000000003 noise.
+            market_rounded = round(float(market), 2) if market is not None else None
+            unrealized_rounded = (
+                round(market_rounded - cost, 2)
+                if market_rounded is not None
+                else None
+            )
+
             items.append(
                 {
                     "card_id": row["id"],
@@ -434,8 +514,8 @@ class Database:
                     "is_graded": bool(row.get("is_graded")),
                     "grade": row.get("grade"),
                     "acquisition_price": cost or None,
-                    "market_price": market,
-                    "unrealized": (market - cost) if market is not None else None,
+                    "market_price": market_rounded,
+                    "unrealized": unrealized_rounded,
                     "snapshot_provider": provider,
                     "snapshot_listing_id": listing,
                     "snapshot_at": snapshot_at,

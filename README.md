@@ -39,8 +39,10 @@ against the most recent pricing snapshots.
 
 **Pricing (`tcg_pricing_*`)** — search a provider, get a full price quote
 (top-level market/low/high plus per-variant breakdown for Pokemon TCG API,
-plus per-grade levels for PriceCharting), and persist snapshots into the
-local DB for later trend queries.
+plus per-grade levels for PriceCharting), persist snapshots into the local
+DB, **bulk-snapshot every attached card in one call** with per-provider
+rate-limit awareness, and **query historical snapshots** as a time series
+for trend analysis.
 
 **Watchlist (`tcg_watchlist_*`)** — add target buy prices with thesis text,
 list by horizon (flip / hold / sealed), update, and close with a reason
@@ -264,11 +266,15 @@ Migrations are forward-only and idempotent (safe to run on every startup).
 
 ## Roadmap
 
-- v0.3 — `tcg_pricing_snapshot_collection` (snapshot every attached card in
-  one call, respecting per-provider rate limits)
-- v0.4 — CGC scraping path or GemRate provider
-- v0.5 — BGS scraping path
-- v0.6 — eBay sold-comp provider for raw market data
+- ✅ **v0.3 — shipped:** `tcg_pricing_snapshot_collection` (bulk snapshot
+  with freshness check), `tcg_pricing_get_history` (time-series query),
+  rounded per-item valuation, clearer PSA 429 error message,
+  `CHANGELOG.md`.
+- v0.4 — CGC scraping path or GemRate provider.
+- v0.5 — BGS scraping path.
+- v0.6 — eBay sold-comp provider for raw market data.
+
+See [`CHANGELOG.md`](CHANGELOG.md) for the full version history.
 
 ---
 

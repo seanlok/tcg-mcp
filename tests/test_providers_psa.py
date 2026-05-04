@@ -180,3 +180,38 @@ async def test_get_cert_handles_flat_root_response(
     assert result.found is True
     assert result.subject == "Pikachu"
     assert result.grade == "MINT 9"
+
+
+def test_psa_429_error_mentions_token_and_quota() -> None:
+    """v0.3 — PSA returns 429 for both invalid token AND rate limiting, so
+    the error message must mention both possibilities."""
+    import httpx
+
+    from tcg_mcp.errors import format_http_error
+
+    req = httpx.Request("GET", "https://api.example.test/publicapi/cert/GetByCertNumber/1")
+    resp = httpx.Response(429, request=req)
+    err = httpx.HTTPStatusError("rate limited", request=req, response=resp)
+
+    msg = format_http_error(err, provider="psa")
+    assert "PSA" in msg
+    # v0.2 said only "rate limit"; v0.3 must mention BOTH causes.
+    assert "PSA_API_TOKEN" in msg or "token" in msg.lower()
+    assert "quota" in msg.lower() or "rate" in msg.lower()
+
+
+def test_non_psa_429_keeps_simple_message() -> None:
+    """Non-PSA providers don't have the dual-meaning 429, so message stays simple."""
+    import httpx
+
+    from tcg_mcp.errors import format_http_error
+
+    req = httpx.Request("GET", "https://example.test/foo")
+    resp = httpx.Response(429, request=req)
+    err = httpx.HTTPStatusError("rate limited", request=req, response=resp)
+
+    msg = format_http_error(err, provider="pricecharting")
+    assert "PRICECHARTING" in msg
+    assert "rate limit" in msg.lower()
+    # Should NOT mention PSA-specific token disambiguation.
+    assert "PSA_API_TOKEN" not in msg

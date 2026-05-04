@@ -1239,6 +1239,286 @@ async def tcg_pricing_snapshot(params: PricingSnapshotInput) -> str:
 
 
 # =============================================================================
+# Stage v0.3 — bulk snapshot + history
+# =============================================================================
+
+
+class PricingSnapshotCollectionInput(_StrictModel):
+    """Snapshot every owned card that has a pricing listing attached."""
+
+    provider: PricingProviderName | None = Field(
+        default=None,
+        description=(
+            "Optional filter — only snapshot cards on this pricing provider. "
+            "None = snapshot all attached cards across providers."
+        ),
+    )
+    max_age_hours: float = Field(
+        default=24.0,
+        ge=0.0,
+        description=(
+            "Skip cards whose latest snapshot is fresher than this. "
+            "Default 24h. Set to 0 to force-refresh all attached cards."
+        ),
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "If True, report what would be snapshotted without making any "
+            "API calls or writing rows."
+        ),
+    )
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=10000,
+        description="Optional cap on cards processed (useful for testing).",
+    )
+
+
+@mcp.tool(
+    name="tcg_pricing_snapshot_collection",
+    annotations={
+        "title": "Pricing — bulk snapshot every attached card in the collection",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    },
+)
+async def tcg_pricing_snapshot_collection(
+    params: PricingSnapshotCollectionInput,
+) -> str:
+    """Walk the collection and snapshot every owned card with an attached
+    pricing listing, respecting per-provider rate limits.
+
+    Skips cards whose most recent snapshot is younger than `max_age_hours`
+    so repeated calls don't burn API quota redundantly. One card failing
+    does not abort the rest — failures are reported per-card.
+
+    Returns a summary with counts (snapshotted / skipped_recent / failed)
+    and a per-provider breakdown.
+    """
+    db = get_db()
+    rows = db.list_owned_with_pricing(provider=params.provider, limit=params.limit)
+
+    summary = {
+        "owned_with_pricing": len(rows),
+        "snapshotted": 0,
+        "skipped_recent": 0,
+        "failed": 0,
+    }
+    by_provider: dict[str, dict[str, int]] = {}
+    snapshots_made: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    fresh_cutoff_seconds = params.max_age_hours * 3600.0
+
+    for row in rows:
+        provider_name = row["pricing_provider"]
+        listing_id = row["pricing_listing_id"]
+        card_id = row["id"]
+        grade = row.get("grade") if row.get("is_graded") else None
+        bp = by_provider.setdefault(
+            provider_name,
+            {"snapshotted": 0, "skipped_recent": 0, "failed": 0},
+        )
+
+        # Freshness check — skip if a snapshot exists newer than max_age_hours.
+        if fresh_cutoff_seconds > 0:
+            latest = db.latest_snapshot(provider_name, listing_id, grade=grade)
+            if latest is not None and latest.get("captured_at"):
+                age_seconds = _captured_age_seconds(latest["captured_at"])
+                if age_seconds is not None and age_seconds < fresh_cutoff_seconds:
+                    summary["skipped_recent"] += 1
+                    bp["skipped_recent"] += 1
+                    continue
+
+        if params.dry_run:
+            snapshots_made.append(
+                {
+                    "card_id": card_id,
+                    "provider": provider_name,
+                    "listing_id": listing_id,
+                    "grade": grade,
+                    "snapshot_ids": [],
+                    "dry_run": True,
+                }
+            )
+            summary["snapshotted"] += 1
+            bp["snapshotted"] += 1
+            continue
+
+        # Fetch + persist (uses the pricing provider's own TokenBucket
+        # so PriceCharting's 1-req/sec limit is respected naturally).
+        try:
+            provider_impl = get_pricing_provider(provider_name)
+        except ProviderNotEnabledError as e:
+            failures.append(
+                {"card_id": card_id, "provider": provider_name, "error": str(e)}
+            )
+            summary["failed"] += 1
+            bp["failed"] += 1
+            continue
+
+        try:
+            quote = await provider_impl.get_price(listing_id)
+        except NotSupportedError as e:
+            failures.append(
+                {"card_id": card_id, "provider": provider_name, "error": str(e)}
+            )
+            summary["failed"] += 1
+            bp["failed"] += 1
+            continue
+        except Exception as e:  # noqa: BLE001
+            failures.append(
+                {
+                    "card_id": card_id,
+                    "provider": provider_name,
+                    "error": format_http_error(e, provider=provider_name),
+                }
+            )
+            summary["failed"] += 1
+            bp["failed"] += 1
+            continue
+
+        ids: list[str] = []
+        # Ungraded / primary row.
+        ids.append(
+            db.add_pricing_snapshot(
+                {
+                    "provider": provider_name,
+                    "listing_id": listing_id,
+                    "grade": None,
+                    "currency": quote.currency,
+                    "market": quote.market,
+                    "low": quote.low,
+                    "high": quote.high,
+                    "raw": quote.raw,
+                }
+            )
+        )
+        # Per-grade rows for providers that return graded levels (PriceCharting).
+        for level in quote.graded_levels:
+            ids.append(
+                db.add_pricing_snapshot(
+                    {
+                        "provider": provider_name,
+                        "listing_id": listing_id,
+                        "grade": level.grade,
+                        "currency": quote.currency,
+                        "market": level.market,
+                        "low": level.market,
+                        "high": level.market,
+                    }
+                )
+            )
+
+        snapshots_made.append(
+            {
+                "card_id": card_id,
+                "provider": provider_name,
+                "listing_id": listing_id,
+                "grade": grade,
+                "snapshot_ids": ids,
+            }
+        )
+        summary["snapshotted"] += 1
+        bp["snapshotted"] += 1
+
+    return json.dumps(
+        {
+            "ok": True,
+            "dry_run": params.dry_run,
+            "summary": summary,
+            "by_provider": by_provider,
+            "snapshots": snapshots_made,
+            "failures": failures,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+class PricingHistoryInput(_StrictModel):
+    """Time-series query against the local pricing_snapshots table."""
+
+    provider: PricingProviderName = Field(...)
+    listing_id: str = Field(..., min_length=1, max_length=64)
+    grade: str | None = Field(
+        default=None,
+        description=(
+            "Grade filter — None = ungraded series, "
+            "or pass an explicit string like 'PSA 10' for graded series."
+        ),
+    )
+    days: int = Field(
+        default=90, ge=1, le=3650,
+        description="Window in days. Default 90.",
+    )
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+@mcp.tool(
+    name="tcg_pricing_get_history",
+    annotations={
+        "title": "Pricing — return a time series of saved snapshots",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def tcg_pricing_get_history(params: PricingHistoryInput) -> str:
+    """Return the time series of pricing snapshots saved for one listing.
+
+    Useful for answering "is PSA 10 trending up?" or "what was Charizard ex
+    SIR worth a month ago?" — but only works for listings you've snapshotted
+    via `tcg_pricing_snapshot` or `tcg_pricing_snapshot_collection`.
+
+    Returned snapshots are oldest-first.
+    """
+    db = get_db()
+    rows = db.list_pricing_snapshots(
+        provider=params.provider,
+        listing_id=params.listing_id,
+        grade=params.grade,
+        days=params.days,
+        limit=params.limit,
+    )
+    return json.dumps(
+        {
+            "provider": params.provider,
+            "listing_id": params.listing_id,
+            "grade": params.grade,
+            "days": params.days,
+            "count": len(rows),
+            "snapshots": rows,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _captured_age_seconds(captured_at: str) -> float | None:
+    """Compute seconds since `captured_at` (a SQLite-style timestamp string).
+
+    SQLite's `datetime('now')` returns naive UTC like '2026-05-04 12:34:56'.
+    """
+    from datetime import datetime, timezone
+
+    if not captured_at:
+        return None
+    try:
+        dt = datetime.fromisoformat(captured_at.replace(" ", "T"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return (now - dt).total_seconds()
+
+
+# =============================================================================
 # Meta tool
 # =============================================================================
 
@@ -1326,6 +1606,8 @@ async def tcg_list_providers(params: ListProvidersInput) -> str:
             "tcg_pricing_search",
             "tcg_pricing_get",
             "tcg_pricing_snapshot",
+            "tcg_pricing_snapshot_collection",
+            "tcg_pricing_get_history",
         ]
     }
     return json.dumps(info, indent=2)
