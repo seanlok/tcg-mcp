@@ -10,5 +10,5 @@ Tool namespaces:
     tcg_list_providers — capability discovery
 """
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 __all__ = ["__version__"]
