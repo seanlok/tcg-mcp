@@ -266,13 +266,20 @@ Migrations are forward-only and idempotent (safe to run on every startup).
 
 ## Roadmap
 
-- ✅ **v0.3 — shipped:** `tcg_pricing_snapshot_collection` (bulk snapshot
-  with freshness check), `tcg_pricing_get_history` (time-series query),
-  rounded per-item valuation, clearer PSA 429 error message,
-  `CHANGELOG.md`.
-- v0.4 — CGC scraping path or GemRate provider.
-- v0.5 — BGS scraping path.
-- v0.6 — eBay sold-comp provider for raw market data.
+> **Standing constraint:** every milestone below has a **free path** as the
+> default. Paid providers (GemRate, eBay Marketplace Insights, etc.) stay
+> optional add-ons that activate only when their key is configured.
+
+- ✅ **v0.3 — shipped:** `tcg_pricing_snapshot_collection`,
+  `tcg_pricing_get_history`, rounded per-item valuation, clearer PSA 429
+  error message, `CHANGELOG.md`.
+- ✅ **v0.4 — shipped:** Catalog tools (`tcg_catalog_*`) backed by Pokemon
+  TCG API, `tcg_collection_set_completion` with watchlist intersection,
+  richer `tcg_collection_search`, smart-routed `tcg_pricing_get_card`.
+- v0.5 — CGC support (free path: polite scraping; optional paid GemRate).
+- v0.6 — BGS support (free path: polite scraping; optional paid GemRate).
+- v0.7 — eBay sold comps (free path: eBay Browse API + scraping; optional
+  paid Marketplace Insights API).
 
 See [`CHANGELOG.md`](CHANGELOG.md) for the full version history.
 

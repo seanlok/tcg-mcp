@@ -39,6 +39,7 @@ from tcg_mcp.models import (
 from tcg_mcp.pricing import (
     PricingProviderName,
     ProductKind,
+    get_pokemontcg_catalog_provider,
     get_pricing_provider,
     list_pricing_provider_names,
 )
@@ -1519,6 +1520,543 @@ def _captured_age_seconds(captured_at: str) -> float | None:
 
 
 # =============================================================================
+# v0.4 — Catalog tools (Pokemon TCG API)
+# =============================================================================
+
+
+class CatalogGetSetInput(_StrictModel):
+    set_id: str = Field(..., min_length=1, max_length=32, description="e.g. 'sv8'")
+
+
+@mcp.tool(
+    name="tcg_catalog_get_set",
+    annotations={
+        "title": "Catalog — fetch one Pokemon TCG set's metadata",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def tcg_catalog_get_set(params: CatalogGetSetInput) -> str:
+    """Fetch a Pokemon TCG set's metadata (name, total cards, release date, …).
+
+    Free — no API key required (Pokemon TCG API).
+    """
+    catalog = get_pokemontcg_catalog_provider()
+    if catalog is None:
+        return "Error: Pokemon TCG catalog provider is not enabled."
+    try:
+        data = await catalog.get_set(params.set_id)
+    except Exception as e:  # noqa: BLE001
+        return format_http_error(e, provider="pokemontcg")
+    if data is None:
+        return f"Error: set '{params.set_id}' not found in Pokemon TCG API."
+    return json.dumps(_normalize_set(data), indent=2, default=str)
+
+
+class CatalogSearchSetInput(_StrictModel):
+    query: str = Field(
+        ..., min_length=1, max_length=200,
+        description=(
+            "Free-text or Lucene query. Plain text becomes a name prefix search "
+            "(e.g. 'Surging' → matches 'Surging Sparks'). Pass full Lucene like "
+            "'series:\"Scarlet & Violet\"' for advanced filtering."
+        ),
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+@mcp.tool(
+    name="tcg_catalog_search_set",
+    annotations={
+        "title": "Catalog — search Pokemon TCG sets by name",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def tcg_catalog_search_set(params: CatalogSearchSetInput) -> str:
+    """Search Pokemon TCG sets. Returns set IDs, names, release dates, totals."""
+    catalog = get_pokemontcg_catalog_provider()
+    if catalog is None:
+        return "Error: Pokemon TCG catalog provider is not enabled."
+    try:
+        rows = await catalog.search_sets(params.query, limit=params.limit)
+    except Exception as e:  # noqa: BLE001
+        return format_http_error(e, provider="pokemontcg")
+    return json.dumps(
+        {
+            "query": params.query,
+            "count": len(rows),
+            "items": [_normalize_set(r) for r in rows],
+        },
+        indent=2,
+        default=str,
+    )
+
+
+class CatalogListCardsInSetInput(_StrictModel):
+    set_id: str = Field(..., min_length=1, max_length=32)
+    rarity: str | None = Field(
+        default=None,
+        description=(
+            "Optional rarity filter, e.g. 'Special Illustration Rare', "
+            "'Hyper Rare', 'Double Rare'."
+        ),
+    )
+    limit: int = Field(default=250, ge=1, le=250)
+    offset: int = Field(default=0, ge=0)
+
+
+@mcp.tool(
+    name="tcg_catalog_list_cards_in_set",
+    annotations={
+        "title": "Catalog — list every card in a Pokemon TCG set",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def tcg_catalog_list_cards_in_set(params: CatalogListCardsInSetInput) -> str:
+    """List every card in a set (optionally filtered by rarity), with TCGPlayer
+    market price where available. Useful for set-completion analysis and
+    rarity-tier breakdowns.
+    """
+    catalog = get_pokemontcg_catalog_provider()
+    if catalog is None:
+        return "Error: Pokemon TCG catalog provider is not enabled."
+    try:
+        rows = await catalog.list_cards_in_set(
+            params.set_id,
+            rarity=params.rarity,
+            limit=params.limit,
+            offset=params.offset,
+        )
+    except Exception as e:  # noqa: BLE001
+        return format_http_error(e, provider="pokemontcg")
+    return json.dumps(
+        {
+            "set_id": params.set_id,
+            "rarity_filter": params.rarity,
+            "count": len(rows),
+            "items": [_normalize_catalog_card(r) for r in rows],
+        },
+        indent=2,
+        default=str,
+    )
+
+
+# =============================================================================
+# v0.4 — Collection set-completion + richer search
+# =============================================================================
+
+
+class CollectionSetCompletionInput(_StrictModel):
+    set_id: str = Field(..., min_length=1, max_length=32)
+    rarity: str | None = Field(
+        default=None,
+        description=(
+            "Optional rarity filter — e.g. 'Special Illustration Rare' to ask "
+            "'how many SIRs do I have from Surging Sparks?'"
+        ),
+    )
+
+
+@mcp.tool(
+    name="tcg_collection_set_completion",
+    annotations={
+        "title": "Collection — set-completion progress with gap pricing",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def tcg_collection_set_completion(
+    params: CollectionSetCompletionInput,
+) -> str:
+    """Compute set-completion progress for a Pokemon TCG set.
+
+    For each card in the set (optionally filtered by rarity):
+      * Owned? Match owned_cards either by attached `pricing_listing_id`
+        equal to the catalog card's `id` (precise), or as a fallback by
+        case-insensitive subject match + card_number exact match.
+      * Watchlist hit? Cross-reference `watchlist.card_descriptor` for
+        substring matches against the card name + set name.
+      * Missing? Sum current Pokemon TCG API market price for the gap.
+
+    Returns owned/missing counts, completion percentage, gap cost in USD,
+    and per-card breakdown.
+    """
+    catalog = get_pokemontcg_catalog_provider()
+    if catalog is None:
+        return "Error: Pokemon TCG catalog provider is not enabled."
+    db = get_db()
+
+    try:
+        set_data = await catalog.get_set(params.set_id)
+        if set_data is None:
+            return f"Error: set '{params.set_id}' not found in Pokemon TCG API."
+        cards_raw = await catalog.list_cards_in_set(
+            params.set_id, rarity=params.rarity, limit=250
+        )
+    except Exception as e:  # noqa: BLE001
+        return format_http_error(e, provider="pokemontcg")
+
+    # Build lookup tables for matching.
+    owned_rows = db.list_owned(status="owned", limit=500)
+    owned_by_listing: dict[str, dict[str, Any]] = {}
+    owned_by_subject_number: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in owned_rows:
+        listing = row.get("pricing_listing_id")
+        if listing:
+            owned_by_listing[listing] = row
+        subj = (row.get("subject") or "").strip().lower()
+        cnum = (row.get("card_number") or "").strip()
+        if subj and cnum:
+            owned_by_subject_number[(subj, cnum)] = row
+
+    watchlist_rows = db.list_watchlist(open_only=True, limit=500)
+    set_name_lower = (set_data.get("name") or "").lower()
+
+    items: list[dict[str, Any]] = []
+    owned_count = 0
+    missing_market_total = 0.0
+    rarity_breakdown: dict[str, dict[str, int]] = {}
+
+    for card in cards_raw:
+        card_id = card.get("id") or ""
+        card_name = (card.get("name") or "").strip()
+        card_number = (card.get("number") or "").strip()
+        card_rarity = (card.get("rarity") or "Unknown").strip()
+
+        # Match against owned.
+        owned = owned_by_listing.get(card_id)
+        match_method: str | None = None
+        if owned is not None:
+            match_method = "pricing_listing_id"
+        else:
+            owned = owned_by_subject_number.get(
+                (card_name.lower(), card_number)
+            )
+            if owned is not None:
+                match_method = "subject+card_number"
+
+        # Watchlist intersection (only meaningful if not owned).
+        on_watchlist = False
+        watchlist_descriptor: str | None = None
+        if owned is None:
+            for w in watchlist_rows:
+                desc = (w.get("card_descriptor") or "").lower()
+                if (
+                    card_name.lower() in desc
+                    or (set_name_lower and set_name_lower in desc)
+                ):
+                    on_watchlist = True
+                    watchlist_descriptor = w.get("card_descriptor")
+                    break
+
+        # Market price (top-level USD from TCGPlayer).
+        market_price = _extract_card_market_price(card)
+
+        # Aggregate.
+        rb = rarity_breakdown.setdefault(
+            card_rarity, {"owned": 0, "missing": 0, "missing_value_usd": 0}
+        )
+        if owned is not None:
+            owned_count += 1
+            rb["owned"] += 1
+        else:
+            rb["missing"] += 1
+            if market_price is not None:
+                missing_market_total += market_price
+                # We sum into a separate float; ints in dict are display-only.
+                rb["missing_value_usd"] = round(
+                    rb["missing_value_usd"] + market_price, 2
+                )
+
+        items.append(
+            {
+                "card_id": card_id,
+                "name": card_name,
+                "card_number": card_number,
+                "rarity": card_rarity,
+                "market_price": market_price,
+                "owned": owned is not None,
+                "owned_card_id": owned["id"] if owned else None,
+                "match_method": match_method,
+                "on_watchlist": on_watchlist,
+                "watchlist_descriptor": watchlist_descriptor,
+            }
+        )
+
+    total = len(items)
+    missing = total - owned_count
+    pct = round((owned_count / total) * 100, 1) if total else 0.0
+
+    return json.dumps(
+        {
+            "set_id": params.set_id,
+            "set_name": set_data.get("name"),
+            "rarity_filter": params.rarity,
+            "summary": {
+                "total_cards": total,
+                "owned": owned_count,
+                "missing": missing,
+                "completion_pct": pct,
+                "missing_value_usd": round(missing_market_total, 2),
+            },
+            "by_rarity": rarity_breakdown,
+            "items": items,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+class CollectionSearchInput(_StrictModel):
+    query: str = Field(
+        ..., min_length=1, max_length=200,
+        description=(
+            "Free-text search across subject, set_name, brand, variety, "
+            "notes, and tags. Case-insensitive substring."
+        ),
+    )
+    status: Literal["owned", "sold", "lost", "graded_out"] | None = "owned"
+    is_graded: bool | None = None
+    language: str | None = None
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+@mcp.tool(
+    name="tcg_collection_search",
+    annotations={
+        "title": "Collection — full-text search across owned cards",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+async def tcg_collection_search(params: CollectionSearchInput) -> str:
+    """Search owned cards across subject, set_name, brand, variety, notes,
+    and tags — richer than `tcg_collection_list`'s subject-only filter.
+    """
+    db = get_db()
+    rows = db.search_owned(
+        query=params.query,
+        status=params.status,
+        is_graded=params.is_graded,
+        language=params.language,
+        limit=params.limit,
+        offset=params.offset,
+    )
+    return json.dumps(
+        {
+            "query": params.query,
+            "count": len(rows),
+            "items": rows,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+# =============================================================================
+# v0.4 — Smart-routing pricing tool
+# =============================================================================
+
+
+class PricingGetCardInput(_StrictModel):
+    query: str = Field(
+        ..., min_length=1, max_length=200,
+        description=(
+            "Free-text card name, or a Pokemon TCG API listing ID like "
+            "'sv8-199' (auto-detected and used directly)."
+        ),
+    )
+    grade: str | None = Field(
+        default=None,
+        description=(
+            "If provided AND PriceCharting is enabled, includes graded "
+            "prices for this grade (e.g. 'PSA 10'). Always-free path "
+            "(Pokemon TCG API raw market) returns regardless."
+        ),
+    )
+    prefer_provider: PricingProviderName | None = Field(
+        default=None,
+        description="Force a specific provider. None = smart routing.",
+    )
+
+
+@mcp.tool(
+    name="tcg_pricing_get_card",
+    annotations={
+        "title": "Pricing — smart-routed lookup with optional graded data",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": True,
+    },
+)
+async def tcg_pricing_get_card(params: PricingGetCardInput) -> str:
+    """Smart-routed price lookup. One call, the right provider(s) under the hood.
+
+    Strategy:
+      * Always queries Pokemon TCG API (free) — gives raw/ungraded market.
+      * If `grade` is provided AND PriceCharting is enabled (token set),
+        ALSO queries PriceCharting for the graded price level.
+      * `prefer_provider` overrides routing entirely.
+
+    Designed so an agent can ask "what's Charizard ex Surging Sparks worth"
+    without knowing which provider to call first.
+    """
+    out: dict[str, Any] = {
+        "query": params.query,
+        "grade": params.grade,
+        "providers_used": [],
+        "raw_market": None,
+        "graded_levels": [],
+        "best_match": None,
+    }
+
+    # Did the user pass a provider-specific listing ID directly?
+    looks_like_pokemontcg_id = "-" in params.query and " " not in params.query
+    pokemontcg = get_pricing_provider("pokemontcg")
+
+    # --- Primary: Pokemon TCG API ---
+    if params.prefer_provider in (None, "pokemontcg"):
+        try:
+            if looks_like_pokemontcg_id:
+                quote = await pokemontcg.get_price(params.query)
+                listings = []
+            else:
+                listings = await pokemontcg.search(params.query, limit=1)
+                quote = None
+                if listings:
+                    quote = await pokemontcg.get_price(listings[0].listing_id)
+            if quote is not None and quote.market is not None:
+                out["providers_used"].append("pokemontcg")
+                out["raw_market"] = {
+                    "currency": quote.currency,
+                    "market": quote.market,
+                    "low": quote.low,
+                    "mid": quote.mid,
+                    "high": quote.high,
+                    "url": quote.url,
+                }
+                out["best_match"] = {
+                    "provider": "pokemontcg",
+                    "listing_id": quote.listing_id,
+                    "name": quote.name,
+                }
+        except Exception as e:  # noqa: BLE001
+            out["pokemontcg_error"] = format_http_error(e, provider="pokemontcg")
+
+    # --- Optional: PriceCharting graded ---
+    want_graded = params.grade is not None and params.prefer_provider in (
+        None, "pricecharting"
+    )
+    if want_graded:
+        try:
+            pc = get_pricing_provider("pricecharting")
+        except ProviderNotEnabledError:
+            out["pricecharting_status"] = (
+                "disabled — set PRICECHARTING_TOKEN to enable graded prices"
+            )
+        else:
+            try:
+                listings = await pc.search(params.query, limit=1)
+                if listings:
+                    quote = await pc.get_price(listings[0].listing_id)
+                    out["providers_used"].append("pricecharting")
+                    matching = [
+                        {"grade": lvl.grade, "market": lvl.market}
+                        for lvl in quote.graded_levels
+                        if lvl.grade.lower() == params.grade.lower()  # type: ignore[union-attr]
+                    ]
+                    out["graded_levels"] = matching or [
+                        {"grade": lvl.grade, "market": lvl.market}
+                        for lvl in quote.graded_levels
+                    ]
+            except Exception as e:  # noqa: BLE001
+                out["pricecharting_error"] = format_http_error(
+                    e, provider="pricecharting"
+                )
+
+    return json.dumps(out, indent=2, default=str)
+
+
+# =============================================================================
+# Catalog normalizers
+# =============================================================================
+
+
+def _normalize_set(data: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "set_id": data.get("id"),
+        "name": data.get("name"),
+        "series": data.get("series"),
+        "printed_total": data.get("printedTotal"),
+        "total": data.get("total"),
+        "release_date": data.get("releaseDate"),
+        "ptcgo_code": data.get("ptcgoCode"),
+        "images": data.get("images"),
+    }
+
+
+def _normalize_catalog_card(card: dict[str, Any]) -> dict[str, Any]:
+    """Strip the catalog card down to what tools / agents need."""
+    market = _extract_card_market_price(card)
+    set_block = card.get("set") or {}
+    return {
+        "card_id": card.get("id"),
+        "name": card.get("name"),
+        "set_id": set_block.get("id"),
+        "set_name": set_block.get("name"),
+        "card_number": card.get("number"),
+        "rarity": card.get("rarity"),
+        "artist": card.get("artist"),
+        "market_price_usd": market,
+        "tcgplayer_url": (card.get("tcgplayer") or {}).get("url"),
+        "images": card.get("images"),
+    }
+
+
+def _extract_card_market_price(card: dict[str, Any]) -> float | None:
+    """Pull a single representative USD market price from a catalog card.
+
+    Mirrors `_pick_primary_variant` in pricing/pokemontcg.py — prefer
+    1stEditionHolofoil > holofoil > normal > anything else.
+    """
+    prices = (card.get("tcgplayer") or {}).get("prices") or {}
+    if not isinstance(prices, dict) or not prices:
+        return None
+    for variant in (
+        "1stEditionHolofoil", "holofoil", "1stEditionNormal",
+        "reverseHolofoil", "normal", "unlimitedHolofoil", "unlimited",
+    ):
+        v = prices.get(variant)
+        if isinstance(v, dict) and v.get("market") is not None:
+            try:
+                return float(v["market"])
+            except (TypeError, ValueError):
+                pass
+    # Fallback: first variant with any market
+    for v in prices.values():
+        if isinstance(v, dict) and v.get("market") is not None:
+            try:
+                return float(v["market"])
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+# =============================================================================
 # Meta tool
 # =============================================================================
 
@@ -1605,10 +2143,20 @@ async def tcg_list_providers(params: ListProvidersInput) -> str:
         "pricing": [
             "tcg_pricing_search",
             "tcg_pricing_get",
+            "tcg_pricing_get_card",
             "tcg_pricing_snapshot",
             "tcg_pricing_snapshot_collection",
             "tcg_pricing_get_history",
-        ]
+        ],
+        "catalog": [
+            "tcg_catalog_get_set",
+            "tcg_catalog_search_set",
+            "tcg_catalog_list_cards_in_set",
+        ],
+        "collection": [
+            "tcg_collection_search",
+            "tcg_collection_set_completion",
+        ],
     }
     return json.dumps(info, indent=2)
 

@@ -97,6 +97,58 @@ class PriceQuote(BaseModel):
     raw: dict[str, Any] = Field(default_factory=dict)
 
 
+# ---- Catalog models (v0.4) -------------------------------------------------
+#
+# Catalog tools sit alongside pricing tools because they share the Pokemon TCG
+# API as a backing store. They live here rather than in their own subpackage
+# to avoid a circular dep with the PricingProvider abstraction.
+
+
+class SetInfo(BaseModel):
+    """Metadata for one Pokemon TCG set."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    set_id: str = Field(..., description="Provider-native set ID (e.g. 'sv8')")
+    name: str = Field(..., description="Set name (e.g. 'Surging Sparks')")
+    series: str | None = None
+    printed_total: int | None = Field(
+        default=None,
+        description="Number of cards in the printed set (without secret rares).",
+    )
+    total: int | None = Field(
+        default=None,
+        description="Number of cards including secret rares + alt arts.",
+    )
+    release_date: str | None = None
+    ptcgo_code: str | None = None
+    images: dict[str, Any] | None = None
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
+class CatalogCard(BaseModel):
+    """One card in the Pokemon TCG catalog (search/list result)."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    card_id: str = Field(..., description="Provider-native card ID (e.g. 'sv8-199')")
+    name: str
+    set_id: str | None = None
+    set_name: str | None = None
+    card_number: str | None = None
+    rarity: str | None = None
+    artist: str | None = None
+    images: dict[str, Any] | None = None
+    market_price: float | None = Field(
+        default=None,
+        description=(
+            "Best-effort top-line market price in USD from TCGPlayer "
+            "(picks the dominant variant — same logic as PriceQuote)."
+        ),
+    )
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+
 def cents_to_dollars(cents: int | None) -> float | None:
     """PriceCharting encodes prices as integer pennies. Convert to float dollars.
 

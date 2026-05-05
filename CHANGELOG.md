@@ -6,6 +6,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-04
+
+### Added
+- **Catalog tools** — three new `tcg_catalog_*` tools backed by the
+  Pokemon TCG API (free, no key required):
+  - `tcg_catalog_get_set` — fetch one set's metadata.
+  - `tcg_catalog_search_set` — search sets by name (Lucene-aware).
+  - `tcg_catalog_list_cards_in_set` — every card in a set, with TCGPlayer
+    market price, optional rarity filter.
+- **`tcg_collection_set_completion`** — ties the catalog into your local
+  collection. For a given set (and optional rarity filter): owned vs
+  missing counts, completion %, total USD value of the gap, per-rarity
+  breakdown, and watchlist intersection. Matches owned cards either by
+  attached `pricing_listing_id` (precise) or by subject + card_number
+  fallback. Cross-references open watchlist entries by descriptor
+  substring.
+- **`tcg_collection_search`** — full-text search across `subject`,
+  `set_name`, `brand`, `variety`, `notes`, and `tags`. Richer than the
+  existing `tcg_collection_list`'s subject-only `subject_like` filter.
+  Supports filtering by `status`, `is_graded`, and `language`.
+- **`tcg_pricing_get_card`** — smart-routed pricing lookup. Always queries
+  Pokemon TCG API for the raw market price. If `grade` is set AND
+  PriceCharting is enabled (PRICECHARTING_TOKEN configured), additionally
+  queries PriceCharting for the matching graded level. Designed for
+  agent UX: one call, the right provider(s) under the hood.
+- `db.search_owned()` — storage helper backing `tcg_collection_search`.
+- `PokemonTCGProvider.get_set()`, `.search_sets()`,
+  `.list_cards_in_set()` — catalog endpoints on the existing provider so
+  the catalog tools share its httpx client, throttle, and API key.
+- `pricing.get_pokemontcg_catalog_provider()` — typed accessor for the
+  concrete provider (catalog endpoints aren't part of the
+  `PricingProvider` Protocol).
+
+### Changed
+- README roadmap explicitly tags every future milestone (CGC, BGS, eBay)
+  as "free path is always available", codifying the strategic constraint
+  that paid providers stay optional.
+- `tcg_list_providers` now reports new `catalog` and `collection` tool
+  groupings alongside `pricing`.
+
 ## [0.3.0] - 2026-05-04
 
 ### Added
@@ -74,7 +114,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Watchlist with target buy prices, horizon (flip/hold/sealed), and
   thesis text.
 
-[Unreleased]: https://github.com/seanlok/tcg-mcp/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/seanlok/tcg-mcp/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/seanlok/tcg-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/seanlok/tcg-mcp/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/seanlok/tcg-mcp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/seanlok/tcg-mcp/compare/v0.2.0...v0.2.1

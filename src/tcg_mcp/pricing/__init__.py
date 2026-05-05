@@ -7,10 +7,12 @@ from tcg_mcp.errors import ProviderNotEnabledError
 from tcg_mcp.pricing.base import PricingProvider
 from tcg_mcp.pricing.models import (
     CardListing,
+    CatalogCard,
     GradedPriceLevel,
     PriceQuote,
     PricingProviderName,
     ProductKind,
+    SetInfo,
     cents_to_dollars,
 )
 from tcg_mcp.pricing.pokemontcg import PokemonTCGProvider
@@ -75,13 +77,29 @@ def list_pricing_provider_names() -> list[PricingProviderName]:
     return list(get_pricing_registry().keys())
 
 
+def get_pokemontcg_catalog_provider() -> PokemonTCGProvider | None:
+    """Return the concrete `PokemonTCGProvider` for catalog calls.
+
+    The catalog tools (`tcg_catalog_*`) need the concrete class because the
+    catalog endpoints (`get_set`, `search_sets`, `list_cards_in_set`) live on
+    that class and aren't part of the `PricingProvider` Protocol.
+
+    Returns None if the Pokemon TCG provider isn't registered, but in
+    practice this is always present (it's free and has no required key).
+    """
+    p = get_pricing_registry().get("pokemontcg")
+    return p if isinstance(p, PokemonTCGProvider) else None
+
+
 __all__ = [
     # Models
     "CardListing",
+    "CatalogCard",
     "PriceQuote",
     "GradedPriceLevel",
     "ProductKind",
     "PricingProviderName",
+    "SetInfo",
     "cents_to_dollars",
     # Providers
     "PricingProvider",
@@ -90,6 +108,7 @@ __all__ = [
     "SnkrdunkProvider",
     # Registry
     "get_pricing_provider",
+    "get_pokemontcg_catalog_provider",
     "get_pricing_registry",
     "list_pricing_provider_names",
     "reset_pricing_registry",

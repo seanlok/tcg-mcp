@@ -278,6 +278,57 @@ class Database:
             cur = conn.execute(sql, params)
             return list(cur.fetchall())
 
+    def search_owned(
+        self,
+        query: str,
+        *,
+        status: str | None = "owned",
+        is_graded: bool | None = None,
+        language: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Free-text search across owned_cards (v0.4).
+
+        Searches across `subject`, `set_name`, `brand`, `variety`, `notes`,
+        and `tags` with case-insensitive substring matching. Provides richer
+        discovery than `list_owned(subject_like=...)` which only hits one
+        column.
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+
+        if query:
+            like = f"%{query}%"
+            clauses.append(
+                "("
+                "LOWER(COALESCE(subject,'')) LIKE LOWER(?) OR "
+                "LOWER(COALESCE(set_name,'')) LIKE LOWER(?) OR "
+                "LOWER(COALESCE(brand,'')) LIKE LOWER(?) OR "
+                "LOWER(COALESCE(variety,'')) LIKE LOWER(?) OR "
+                "LOWER(COALESCE(notes,'')) LIKE LOWER(?) OR "
+                "LOWER(COALESCE(tags,'')) LIKE LOWER(?)"
+                ")"
+            )
+            params.extend([like] * 6)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if is_graded is not None:
+            clauses.append("is_graded = ?")
+            params.append(1 if is_graded else 0)
+        if language is not None:
+            clauses.append("language = ?")
+            params.append(language)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        sql = (
+            f"SELECT * FROM owned_cards {where} "
+            "ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        )
+        with self.connect() as conn:
+            cur = conn.execute(sql, params + [limit, offset])
+            return list(cur.fetchall())
+
     def list_owned_with_pricing(
         self,
         *,

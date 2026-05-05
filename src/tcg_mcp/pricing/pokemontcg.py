@@ -160,6 +160,71 @@ class PokemonTCGProvider(BasePricingProvider):
             raw=card,
         )
 
+    # ---- Catalog endpoints (v0.4) ------------------------------------------
+    # These don't fit the PricingProvider Protocol but live on the same class
+    # to share the httpx client, throttle, and API key.
+
+    async def get_set(self, set_id: str) -> dict[str, Any] | None:
+        """Fetch one set's metadata. Returns the raw `data` dict or None."""
+
+        async def do() -> dict[str, Any]:
+            await self._bucket.acquire()
+            async with self._client() as client:
+                r = await client.get(f"/sets/{set_id}")
+                r.raise_for_status()
+                return r.json()
+
+        payload = await with_retries(do, provider="pokemontcg")
+        return (payload or {}).get("data") or None
+
+    async def search_sets(
+        self, query: str, *, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """Search sets by Lucene query (e.g. 'name:Surging*'). Returns raw dicts."""
+        if ":" not in query:
+            q = f'name:"{query}*"'
+        else:
+            q = query
+        params = {"q": q, "pageSize": min(limit, 250)}
+
+        async def do() -> dict[str, Any]:
+            await self._bucket.acquire()
+            async with self._client() as client:
+                r = await client.get("/sets", params=params)
+                r.raise_for_status()
+                return r.json()
+
+        payload = await with_retries(do, provider="pokemontcg")
+        return list((payload or {}).get("data") or [])[:limit]
+
+    async def list_cards_in_set(
+        self,
+        set_id: str,
+        *,
+        rarity: str | None = None,
+        limit: int = 250,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """List every card in a set, optionally filtered by rarity."""
+        q = f'set.id:{set_id}'
+        if rarity:
+            # Lucene uses + for AND; quote the rarity since it has spaces.
+            q = f'{q} rarity:"{rarity}"'
+        # Pokemon TCG API uses page-based pagination, not offset.
+        page_size = min(limit, 250)
+        page = (offset // page_size) + 1 if page_size else 1
+        params = {"q": q, "pageSize": page_size, "page": page}
+
+        async def do() -> dict[str, Any]:
+            await self._bucket.acquire()
+            async with self._client() as client:
+                r = await client.get("/cards", params=params)
+                r.raise_for_status()
+                return r.json()
+
+        payload = await with_retries(do, provider="pokemontcg")
+        return list((payload or {}).get("data") or [])[:limit]
+
 
 # ---- helpers ----------------------------------------------------------------
 
